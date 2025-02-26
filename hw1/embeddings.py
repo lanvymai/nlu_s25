@@ -33,6 +33,7 @@ class Embeddings:
 
     def __contains__(self, word: str) -> bool:
         return word in self.words
+    
 
     def __getitem__(self, words: Iterable[str]) -> np.ndarray:
         """
@@ -42,6 +43,12 @@ class Embeddings:
         :return: A 2D array of shape (len(words), embedding_size) where
             for each i, the ith row is the embedding for words[i]
         """
+        if isinstance(words, str):
+            # Access single vector using self.indices and self.vectors
+            return self.vectors[self.indices[words]]
+        # Access list of vectors using self.indices and self.vectors
+        return self.vectors[[self.indices[word] for word in words]]
+            
         raise NotImplementedError("Problem 1b has not been completed yet!")
 
     @classmethod
@@ -53,4 +60,27 @@ class Embeddings:
         :param filename: The name of the file containing the embeddings
         :return: An Embeddings object containing the loaded embeddings
         """
+        # Efficient implementation (4-line of code)
+        with open(filename, "r") as f:
+            lines = f.readlines()
+        words, vectors = zip(*[(line.split()[0], np.fromstring(line.split(maxsplit=1)[1], sep=' ')) for line in lines])
+        return cls(words, np.array(vectors))
+    
+        # Brute-force implementation
+        # words = []
+        # vectors = []
+
+        # with open(filename, "r") as f:
+        #     for line in f:
+        #         parts = line.split()
+        #         word = parts[0]
+        #         vector = np.array([float(x) for x in parts[1:]])
+
+        #         words.append(word)
+        #         vectors.append(vector)
+
+        # vectors = np.array(vectors)
+        # return cls(words, vectors)
+    
+        
         raise NotImplementedError("Problem 1b has not been completed yet!")
