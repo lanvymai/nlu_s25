@@ -20,6 +20,7 @@ SIF_IMAGE=/scratch/$USER/cuda11.4.2-cudnn8.2.4-devel-ubuntu20.04.3.sif
 
 singularity exec --nv --overlay $OVERLAY_FILE:ro --bind /scratch/nm4867/nlu_s25:/scratch/nm4867/nlu_s25 $SIF_IMAGE /bin/bash -c "
 source /ext3/env.sh
-cd /scratch/nm4867/nlu_s25/hw3/hpc
-bash run_truthfulqa_evaluation.sh
+cd /scratch/nm4867/nlu_s25/hw3
+python truthfulqa.py facebook/opt-6.7b
+
 "
