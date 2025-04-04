@@ -173,28 +173,18 @@ class MultipleChoicePipeline(Pipeline):
                 etc.
         """
         input_texts = []
-        demo = ""
-
-        # Checks if demonstrations exist MATCH THE FORMAT
-        if self.demonstrations:
-            demo = self.demonstrations + "\n\n"
-
-        # Iterate through quesitons in batch
+        
         for i in range(len(batch["question"])):
             question = batch["question"][i]
             choices = batch["choices"][i]
-            # Iterate through answer choices
-            for choice in choices:
-                # Match the format:
-                text = f"{demo}Q: {question}\nA: "
-                # Checks for system prompt and add if it exists
-                if self.system_prompt:
-                    text += f"{self.system_prompt} "
             
-                text += choice
-                input_texts.append(text)
-
+            for choice in choices:
+                # Format: [demonstrations] + "Q: " + question + "\nA: " + [system_prompt] + choice
+                input_text = f"{self._demos}Q: {question}\nA:{self._system_prompt}{choice}"
+                input_texts.append(input_text)
+        
         return input_texts
+
         raise NotImplementedError("Problem 2c has not been completed yet!")
 
     def preprocess(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -213,18 +203,21 @@ class MultipleChoicePipeline(Pipeline):
             These tensors should be stored on the GPU if it is being
             used; otherwise, they should be stored on the CPU
         """
-        # input texts for all questions and answer choices
+        # Get the input texts for all answer choices in the batch
         input_texts = self._get_input_texts(batch)
-
-        #tokenize
-        tokenized = self.tokenizer(
+        
+        # Tokenize the input texts
+        inputs = self.tokenizer(
             input_texts,
             padding=True,
-            truncation=True,
             return_tensors="pt"
         )
-        tokenized = {k: v.to(self.device) for k, v in tokenized.items()}
-        return tokenized
+        
+        # Move the tensors to the appropriate device (GPU if available)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        
+        return inputs
+
         raise NotImplementedError("Problem 2d has not been completed yet!")
 
     def _forward(self, input_: Dict[str, torch.Tensor]) -> \
@@ -273,33 +266,35 @@ class MultipleChoicePipeline(Pipeline):
         """
         input_ids = outputs["input_ids"]
         logits = outputs["logits"]
-
-        # num_choices already init
-        num_q = input_ids.shape[0] // self.num_choices
-
-        losses = []
-        for i in range(input_ids.shape[0]):
-            seq_len = (input_ids[i] != self.tokenizer.pad_token_id).sum()
-            #calc CE loss (skip first token b/c it's question)
-            seq_logits = logits[i, :seq_len - 1, :] # shape seq_len - 1, v
-            target = input_ids[i, 1:seq_len] # shape seq_len - 1
-
-            # loss funciton already initialized
-            loss = self.loss_fn(
-                seq_logits,
-                target
-            )
-            loss_value = loss.sum().detach().cpu().item()
-            losses.append(loss_value)
-
-        # dtype=np.float32 or .astype(np.float32)
-        # reshape for num_q, 4
-        losses = np.array(losses, dtype = np.float32).reshape(num_q, self.num_choices)
-        print(losses)
-        # axis = 1 makes array instead of single scalar
-        predict = np.argmin(losses, axis = 1)
-        print(predict)
-        return Output(loss = losses, prediction = predict)
+        
+        # Calculate the loss for each token
+        # For each position, we want to calculate the loss for predicting the next token
+        # Shift the input_ids right to get the target tokens
+        shift_labels = input_ids[..., 1:].contiguous()
+        shift_logits = logits[..., :-1, :].contiguous()
+        
+        # Calculate the loss for each token using the cross-entropy loss function
+        token_losses = self.loss_fn(
+            shift_logits.view(-1, shift_logits.size(-1)), 
+            shift_labels.view(-1)
+        )
+        
+        # Reshape the token losses to match the input shape
+        token_losses = token_losses.view(shift_labels.size())
+        
+        # Sum the losses over the sequence dimension to get the total loss for each answer choice
+        sequence_losses = token_losses.sum(dim=1).cpu().numpy()
+        
+        # Reshape the losses to a matrix where each row is a question and each column is an answer choice
+        batch_size = len(sequence_losses) // self.num_choices
+        loss_matrix = sequence_losses.reshape(batch_size, self.num_choices)
+        
+        # Find the answer choice with the minimum loss for each question
+        predictions = np.argmin(loss_matrix, axis=1)
+        
+        # Return the losses and predictions as an Output named tuple
+        return Output(loss=loss_matrix, prediction=predictions)
+    
         raise NotImplementedError("Problem 2d has not been completed yet!")
 
 
@@ -356,7 +351,7 @@ def evaluate_truthfulqa(pipeline: MultipleChoicePipeline, dataset: Dataset,
     no_demos = "_no_demos" if pipeline.demonstrations is None else ""
     system_prompt = "" if pipeline.system_prompt is None else \
         "_" + _sanitize(pipeline.system_prompt)
-    fn = f"results/{model_name}{no_demos}{system_prompt}_predictions_acc" \
+    fn = f"/scratch/nm4867/nlu_s25/hw3/results/{model_name}{no_demos}{system_prompt}_predictions_acc" \
          f"={accuracy['accuracy']:.3f}.csv"
     save_outputs(dataset, results, fn)
 
@@ -395,7 +390,7 @@ if __name__ == "__main__":
     # Load pipeline and prompts
     lm = MultipleChoicePipeline(model=args.model)
     if not args.no_demos:
-        lm.load_demonstrations("prompt_templates/" + args.demos)
+        lm.load_demonstrations("/scratch/nm4867/nlu_s25/hw3/prompt_templates/" + args.demos)
     if args.system_prompt != "":
         lm.set_system_prompt(args.system_prompt)
 
