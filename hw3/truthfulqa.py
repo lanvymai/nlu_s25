@@ -351,7 +351,7 @@ def evaluate_truthfulqa(pipeline: MultipleChoicePipeline, dataset: Dataset,
     no_demos = "_no_demos" if pipeline.demonstrations is None else ""
     system_prompt = "" if pipeline.system_prompt is None else \
         "_" + _sanitize(pipeline.system_prompt)
-    fn = f"/scratch/nm4867/nlu_s25/hw3/results/{model_name}{no_demos}{system_prompt}_predictions_acc" \
+    fn = f"{model_name}{no_demos}{system_prompt}_predictions_acc" \
          f"={accuracy['accuracy']:.3f}.csv"
     save_outputs(dataset, results, fn)
 
@@ -390,7 +390,7 @@ if __name__ == "__main__":
     # Load pipeline and prompts
     lm = MultipleChoicePipeline(model=args.model)
     if not args.no_demos:
-        lm.load_demonstrations("/scratch/nm4867/nlu_s25/hw3/prompt_templates/" + args.demos)
+        lm.load_demonstrations("prompt_templates/" + args.demos)
     if args.system_prompt != "":
         lm.set_system_prompt(args.system_prompt)
 
