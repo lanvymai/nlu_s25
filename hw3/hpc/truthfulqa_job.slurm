@@ -1,7 +1,6 @@
 #!/bin/bash
 
 #SBATCH --job-name=truthfulqa
-#SBATCH --partition=n1s8-v100-1 
 #SBATCH --gres=gpu:v100:1
 #SBATCH --output=./%j_%x.out
 #SBATCH --error=./%j_%x.err
@@ -11,7 +10,6 @@
 #SBATCH --requeue
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=nm4867@nyu.edu
-#SBATCH --account=ds_ga_1012-2025sp  # Missing account line in your version
 
 module purge
 
