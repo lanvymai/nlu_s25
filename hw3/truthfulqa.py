@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
-from transformers import Pipeline, AutoModelForCausalLM, AutoTokenizer
+from transformers import Pipeline, AutoModelForCausalLM, AutoTokenizer, OPTForCausalLM
 
 """ Helper functions """
 
@@ -78,34 +78,41 @@ class MultipleChoicePipeline(Pipeline):
         :param num_choices: The number of answer choices per question
         """
         self.num_choices = num_choices
+        try:
+            # Load the LLM and tokenizer
+            lm = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+            lm.eval()
 
-        # Load the LLM and tokenizer
-        lm = AutoModelForCausalLM.from_pretrained(model)
-        lm.eval()
+            tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, trust_remote_code=True)
+            if tokenizer.pad_token is None:  # GPT-2 doesn't have a pad token
+                tokenizer.pad_token = tokenizer.eos_token
+                if tokenizer.pad_token is None:
+                    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
-        tokenizer = AutoTokenizer.from_pretrained(model)
-        if tokenizer.pad_token is None:  # GPT-2 doesn't have a pad token
-            tokenizer.pad_token = tokenizer.eos_token
+            # Use GPU if it's available
+            device = 0 if torch.cuda.is_available() else None
+            super().__init__(lm, tokenizer, device=device)
+            self.model.to(self.device)
 
-        # Use GPU if it's available
-        device = 0 if torch.cuda.is_available() else None
-        super().__init__(lm, tokenizer, device=device)
-        self.model.to(self.device)
+            # Initialize loss function (make it ignore pad tokens). Note the
+            # use of the reduction="none" keyword argument.
+            self.loss_fn = nn.CrossEntropyLoss(
+                ignore_index=tokenizer.pad_token_id, reduction="none")
 
-        # Initialize loss function (make it ignore pad tokens). Note the
-        # use of the reduction="none" keyword argument.
-        self.loss_fn = nn.CrossEntropyLoss(
-            ignore_index=tokenizer.pad_token_id, reduction="none")
+            # Demonstrations for few-shot prompting. When demonstrations are
+            # used, this variable always ends with \n\n. When demonstrations
+            # are not used, this variable is the empty string.
+            self._demos = ""
 
-        # Demonstrations for few-shot prompting. When demonstrations are
-        # used, this variable always ends with \n\n. When demonstrations
-        # are not used, this variable is the empty string.
-        self._demos = ""
-
-        # When there is a system prompt, this variable always begins
-        # with a space, followed by the system prompt. When there is no
-        # system prompt, this variable is the empty string.
-        self._system_prompt = ""
+            # When there is a system prompt, this variable always begins
+            # with a space, followed by the system prompt. When there is no
+            # system prompt, this variable is the empty string.
+            self._system_prompt = ""
+        except Exception as e:
+            print(f"Comprehensive OPT model initialization error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise 
 
     @property
     def name(self):
@@ -165,6 +172,29 @@ class MultipleChoicePipeline(Pipeline):
                 text 5 corresponds to answer choice 1 for question 1,
                 etc.
         """
+        input_texts = []
+        demo = ""
+
+        # Checks if demonstrations exist MATCH THE FORMAT
+        if self.demonstrations:
+            demo = self.demonstrations + "\n\n"
+
+        # Iterate through quesitons in batch
+        for i in range(len(batch["question"])):
+            question = batch["question"][i]
+            choices = batch["choices"][i]
+            # Iterate through answer choices
+            for choice in choices:
+                # Match the format:
+                text = f"{demo}Q: {question}\nA: "
+                # Checks for system prompt and add if it exists
+                if self.system_prompt:
+                    text += f"{self.system_prompt} "
+            
+                text += choice
+                input_texts.append(text)
+
+        return input_texts
         raise NotImplementedError("Problem 2c has not been completed yet!")
 
     def preprocess(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -183,6 +213,18 @@ class MultipleChoicePipeline(Pipeline):
             These tensors should be stored on the GPU if it is being
             used; otherwise, they should be stored on the CPU
         """
+        # input texts for all questions and answer choices
+        input_texts = self._get_input_texts(batch)
+
+        #tokenize
+        tokenized = self.tokenizer(
+            input_texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+        tokenized = {k: v.to(self.device) for k, v in tokenized.items()}
+        return tokenized
         raise NotImplementedError("Problem 2d has not been completed yet!")
 
     def _forward(self, input_: Dict[str, torch.Tensor]) -> \
@@ -198,6 +240,16 @@ class MultipleChoicePipeline(Pipeline):
         :return: The logit scores assigned to each next-token prediction
             as well as the input_ids tensor from input_
         """
+        # Use torch.no_grad to save memory since we're only doing inference
+        with torch.no_grad():
+            # Pass the inputs through the model to get the outputs
+            outputs = self.model(**input_)
+            
+            # Return a dictionary with the input_ids and logits
+            return {
+                "input_ids": input_["input_ids"],
+                "logits": outputs.logits
+            }
         raise NotImplementedError("Problem 2d has not been completed yet!")
 
     def postprocess(self, outputs: Dict[str, torch.Tensor]) -> Output:
@@ -219,6 +271,35 @@ class MultipleChoicePipeline(Pipeline):
             responds to question i and column j corresponds to answer
             choice j
         """
+        input_ids = outputs["input_ids"]
+        logits = outputs["logits"]
+
+        # num_choices already init
+        num_q = input_ids.shape[0] // self.num_choices
+
+        losses = []
+        for i in range(input_ids.shape[0]):
+            seq_len = (input_ids[i] != self.tokenizer.pad_token_id).sum()
+            #calc CE loss (skip first token b/c it's question)
+            seq_logits = logits[i, :seq_len - 1, :] # shape seq_len - 1, v
+            target = input_ids[i, 1:seq_len] # shape seq_len - 1
+
+            # loss funciton already initialized
+            loss = self.loss_fn(
+                seq_logits,
+                target
+            )
+            loss_value = loss.sum().detach().cpu().item()
+            losses.append(loss_value)
+
+        # dtype=np.float32 or .astype(np.float32)
+        # reshape for num_q, 4
+        losses = np.array(losses, dtype = np.float32).reshape(num_q, self.num_choices)
+        print(losses)
+        # axis = 1 makes array instead of single scalar
+        predict = np.argmin(losses, axis = 1)
+        print(predict)
+        return Output(loss = losses, prediction = predict)
         raise NotImplementedError("Problem 2d has not been completed yet!")
 
 
